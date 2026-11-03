@@ -444,8 +444,11 @@ function getLeaseLifecycle(key: string, kind: LeaseKind): LeaseLifecycle {
   return getSurfaceFromKey(key) === 'browser' ? 'persistent' : 'ephemeral';
 }
 
-function getOwnedWindowRole(key: string): OwnedWindowRole {
-  return getSurfaceFromKey(key) === 'browser' ? 'interactive' : 'automation';
+// Every owned lease, browser or adapter, lives in the one interactive
+// "OpenCLI Browser" group so automation never spreads over several
+// windows/groups. Adapter leases keep their own idle timeout and lifecycle.
+function getOwnedWindowRole(_key: string): OwnedWindowRole {
+  return 'interactive';
 }
 
 function getWindowRole(key: string, ownership: LeaseOwnership): WindowRole {
@@ -454,7 +457,7 @@ function getWindowRole(key: string, ownership: LeaseOwnership): WindowRole {
 
 function getWindowMode(key: string): WindowMode {
   return sessionOverrides.get(key)?.windowMode
-    ?? (getOwnedWindowRole(key) === 'interactive' ? 'foreground' : 'background');
+    ?? (getSurfaceFromKey(key) === 'browser' ? 'foreground' : 'background');
 }
 
 function makeAlarmName(leaseKey: string): string {
@@ -1014,6 +1017,17 @@ async function ensureOwnedContainerWindowUnlocked(
     };
   }
 
+  // Reuse an existing normal window (the resident about:blank window) rather
+  // than opening another one; the group is created around the leased tab.
+  const hostWindow = await findHostWindow();
+  if (hostWindow !== null) {
+    container.windowId = hostWindow;
+    await focusOwnedWindowIfRequested(hostWindow, mode);
+    const initialTabId = await findReusableOwnedContainerTab(hostWindow, null);
+    await persistRuntimeState();
+    return { windowId: hostWindow, initialTabId };
+  }
+
   const startUrl = (initialUrl && isSafeNavigationUrl(initialUrl)) ? initialUrl : BLANK_PAGE;
 
   // Note: Do NOT set `state` parameter here. Chrome 146+ rejects 'normal' as an invalid
@@ -1060,10 +1074,18 @@ async function ensureOwnedContainerWindowUnlocked(
   return { windowId: group?.windowId ?? container.windowId, initialTabId };
 }
 
+async function findHostWindow(): Promise<number | null> {
+  const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+  const usable = windows.filter(win => win.id !== undefined && !win.incognito);
+  const host = usable.find(win => win.focused) ?? usable[0];
+  return host?.id ?? null;
+}
+
 async function findReusableOwnedContainerTab(windowId: number, ownedGroupId?: number | null): Promise<number | undefined> {
   const tabs = await chrome.tabs.query({ windowId });
   // Group members and non-http placeholders stay eligible. Without a group
-  // signal, only non-http placeholders can be reused.
+  // signal, only non-http placeholders can be reused, and never one inside a
+  // group OpenCLI does not own (e.g. a user's or a restored saved group).
   const reusable = tabs.find(tab =>
     tab.id !== undefined &&
     initialTabIsAvailable(tab.id) &&
@@ -1071,7 +1093,7 @@ async function findReusableOwnedContainerTab(windowId: number, ownedGroupId?: nu
     (
       ownedGroupId === undefined ||
       (ownedGroupId !== null && tab.groupId === ownedGroupId) ||
-      !isSafeNavigationUrl(tab.url ?? '')
+      (!isSafeNavigationUrl(tab.url ?? '') && (tab.groupId === undefined || tab.groupId < 0))
     ),
   );
   return reusable?.id;
@@ -1089,12 +1111,28 @@ async function createOwnedTabLease(leaseKey: string, initialUrl?: string): Promi
   return withLeaseMutation(() => createOwnedTabLeaseUnlocked(leaseKey, initialUrl));
 }
 
+async function legacyOwnedWindowId(leaseKey: string): Promise<number | null> {
+  const session = automationSessions.get(leaseKey);
+  if (!session?.owned || session.preferredTabId !== null) return null;
+  try {
+    await chrome.windows.get(session.windowId);
+    return session.windowId;
+  } catch {
+    return null;
+  }
+}
+
 async function createOwnedTabLeaseUnlocked(leaseKey: string, initialUrl?: string): Promise<ResolvedTab> {
   const targetUrl = (initialUrl && isSafeNavigationUrl(initialUrl)) ? initialUrl : BLANK_PAGE;
   const role = getOwnedWindowRole(leaseKey);
-  // Container creation must not start the lease's navigation as well. A slow
-  // initial load can still expose about:blank, causing a duplicate tabs.update.
-  const { windowId, initialTabId } = await ensureOwnedContainerWindow(role, BLANK_PAGE, getWindowMode(leaseKey));
+  // A legacy owned window lease (restored without a tab) keeps using its own
+  // window. Otherwise container creation must not start the lease's navigation
+  // as well: a slow initial load can still expose about:blank, causing a
+  // duplicate tabs.update.
+  const legacyWindowId = await legacyOwnedWindowId(leaseKey);
+  const { windowId, initialTabId } = legacyWindowId !== null
+    ? { windowId: legacyWindowId, initialTabId: await findReusableOwnedContainerTab(legacyWindowId) }
+    : await ensureOwnedContainerWindow(role, BLANK_PAGE, getWindowMode(leaseKey));
   let tab: chrome.tabs.Tab;
 
   if (initialTabIsAvailable(initialTabId)) {
@@ -2189,6 +2227,18 @@ async function handleWaitDownload(cmd: Command): Promise<Result> {
   }
 }
 
+async function isLastBrowserTab(tabId: number): Promise<boolean> {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    const siblings = await chrome.tabs.query({ windowId: tab.windowId });
+    if (siblings.some(other => other.id !== tabId)) return false;
+    const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+    return !windows.some(win => win.id !== tab.windowId);
+  } catch {
+    return false;
+  }
+}
+
 async function releaseLease(leaseKey: string, reason: string = 'released'): Promise<void> {
   const session = automationSessions.get(leaseKey);
   if (!session) {
@@ -2215,16 +2265,17 @@ async function releaseLease(leaseKey: string, reason: string = 'released'): Prom
       if (hasOtherOwnedLease) {
         await chrome.tabs.remove(tabId).catch(() => {});
         console.log(`[opencli] Released owned tab lease ${tabId} (session=${session.session}, surface=${session.surface}, ${reason})`);
-      } else {
+      } else if (await isLastBrowserTab(tabId)) {
+        // Closing it would quit Chromium; leave one plain blank tab outside any group.
         try {
-          const tab = await chrome.tabs.update(tabId, { url: BLANK_PAGE, active: true });
-          const group = await ensureOwnedContainerGroup(getOwnedWindowRole(leaseKey), session.windowId, [tab.id ?? tabId]);
-          if (group) session.windowId = group.windowId;
-          console.log(`[opencli] Released owned tab lease ${tabId} as reusable placeholder (session=${session.session}, surface=${session.surface}, ${reason})`);
-        } catch {
-          await chrome.tabs.remove(tabId).catch(() => {});
-          console.log(`[opencli] Released owned tab lease ${tabId} (session=${session.session}, surface=${session.surface}, ${reason})`);
-        }
+          await chrome.tabs.update(tabId, { url: BLANK_PAGE });
+          await chrome.tabs.ungroup(tabId);
+        } catch {}
+        console.log(`[opencli] Released owned tab lease ${tabId} as the resident blank tab (session=${session.session}, surface=${session.surface}, ${reason})`);
+      } else {
+        // The group disappears with its last tab; nothing idles in the browser.
+        await chrome.tabs.remove(tabId).catch(() => {});
+        console.log(`[opencli] Released owned tab lease ${tabId} (session=${session.session}, surface=${session.surface}, ${reason})`);
       }
     } else {
       console.log(`[opencli] Released legacy owned window lease ${session.windowId} without closing container (session=${session.session}, surface=${session.surface}, ${reason})`);
