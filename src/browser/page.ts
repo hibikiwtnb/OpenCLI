@@ -252,6 +252,13 @@ export class Page extends CDPBasePage {
     }
   }
 
+  protected override async bringToFront(): Promise<boolean> {
+    const page = this._page ?? ((await this.tabs()) as Array<{ page?: string }>)[0]?.page;
+    if (!page) return false;
+    await this.selectTab(page);
+    return true;
+  }
+
   async selectTab(target: number | string): Promise<void> {
     const result = await sendCommandFull('tabs', {
       op: 'select',

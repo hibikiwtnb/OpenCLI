@@ -1827,6 +1827,36 @@ async function fetchDaemonVersion() {
   }
 }
 async function handleCommand(cmd) {
+  const result = await handleCommandOnce(cmd);
+  if (!result.ok && result.errorCode === "attach_failed" && typeof cmd.session === "string" && cmd.session.trim()) {
+    await replaceUnattachableOwnedTab(getLeaseKey(cmd.session.trim(), getCommandSurface(cmd)));
+  }
+  return result;
+}
+async function replaceUnattachableOwnedTab(leaseKey) {
+  const session = automationSessions.get(leaseKey);
+  if (!session?.owned || session.preferredTabId === null) return;
+  const oldTabId = session.preferredTabId;
+  let oldTab;
+  try {
+    oldTab = await chrome.tabs.get(oldTabId);
+  } catch {
+    return;
+  }
+  const url = oldTab.url && isSafeNavigationUrl(oldTab.url) ? oldTab.url : BLANK_PAGE;
+  await withLeaseMutation(async () => {
+    const fresh = await chrome.tabs.create({ windowId: oldTab.windowId, url, active: oldTab.active });
+    if (!fresh.id) return;
+    await ensureOwnedContainerGroup(getOwnedWindowRole(), oldTab.windowId, [fresh.id]);
+    preferOwnedTab(leaseKey, fresh.id);
+    await safeDetach(oldTabId);
+    evictTab(oldTabId);
+    await chrome.tabs.remove(oldTabId).catch(() => {
+    });
+    console.warn(`[opencli] Replaced unattachable owned tab ${oldTabId} with ${fresh.id} (session=${session.session})`);
+  });
+}
+async function handleCommandOnce(cmd) {
   if (cmd.action === "chrome-describe" || cmd.action === "chrome-call") {
     try {
       if (cmd.action === "chrome-describe") return { id: cmd.id, ok: true, data: await describeChrome(cmd.chromeMethod) };
@@ -2356,6 +2386,7 @@ async function handleTabs(cmd, leaseKey) {
           return { id: cmd.id, ok: false, error: `Page is not in the automation container` };
         }
         await chrome.tabs.update(cmdTabId, { active: true });
+        await focusOwnedWindowIfRequested(tab.windowId, "foreground");
         preferOwnedTab(leaseKey, cmdTabId);
         return pageScopedResult(cmd.id, cmdTabId, { selected: true });
       }
@@ -2363,6 +2394,7 @@ async function handleTabs(cmd, leaseKey) {
       const target = tabs[cmd.index];
       if (!target?.id) return { id: cmd.id, ok: false, error: `Tab index ${cmd.index} not found` };
       await chrome.tabs.update(target.id, { active: true });
+      await focusOwnedWindowIfRequested(target.windowId, "foreground");
       preferOwnedTab(leaseKey, target.id);
       return pageScopedResult(cmd.id, target.id, { selected: true });
     }

@@ -359,10 +359,26 @@ export abstract class BasePage implements IPage {
   }
 
   protected async assertNativeInputVisible(): Promise<void> {
-    let visibility: unknown;
-    try { visibility = await this.evaluate(NATIVE_INPUT_VISIBILITY_JS); }
-    catch { throw new NativeInputVisibilityError(); }
-    if (visibility !== 'visible') throw new NativeInputVisibilityError();
+    if (await this.isPageVisible()) return;
+    // A tab that is not selected, or whose window is minimized or covered,
+    // cannot take native input: bring it to the front once, then re-check.
+    if (await this.bringToFront().catch(() => false)) {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        if (await this.isPageVisible()) return;
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+    }
+    throw new NativeInputVisibilityError();
+  }
+
+  private async isPageVisible(): Promise<boolean> {
+    try { return await this.evaluate(NATIVE_INPUT_VISIBILITY_JS) === 'visible'; }
+    catch { return false; }
+  }
+
+  /** Selects this page's tab and focuses its window; false when unsupported. */
+  protected async bringToFront(): Promise<boolean> {
+    return false;
   }
 
   /** Uses native CDP click support when the concrete page exposes it. */

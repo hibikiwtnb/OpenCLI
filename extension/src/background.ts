@@ -1354,6 +1354,43 @@ async function fetchDaemonVersion(): Promise<string | null> {
 // ─── Command dispatcher ─────────────────────────────────────────────
 
 async function handleCommand(cmd: Command): Promise<Result> {
+  const result = await handleCommandOnce(cmd);
+  if (!result.ok && result.errorCode === 'attach_failed' && typeof cmd.session === 'string' && cmd.session.trim()) {
+    await replaceUnattachableOwnedTab(getLeaseKey(cmd.session.trim(), getCommandSurface(cmd)));
+  }
+  return result;
+}
+
+/**
+ * A tab can get stuck in a state Chrome refuses to debug. For an OpenCLI-owned
+ * lease, swap it for a fresh tab at the same URL so the CLI's single
+ * attach_failed retry lands on a working tab. Borrowed (bound) tabs are never
+ * replaced.
+ */
+async function replaceUnattachableOwnedTab(leaseKey: string): Promise<void> {
+  const session = automationSessions.get(leaseKey);
+  if (!session?.owned || session.preferredTabId === null) return;
+  const oldTabId = session.preferredTabId;
+  let oldTab: chrome.tabs.Tab;
+  try {
+    oldTab = await chrome.tabs.get(oldTabId);
+  } catch {
+    return;
+  }
+  const url = oldTab.url && isSafeNavigationUrl(oldTab.url) ? oldTab.url : BLANK_PAGE;
+  await withLeaseMutation(async () => {
+    const fresh = await chrome.tabs.create({ windowId: oldTab.windowId, url, active: oldTab.active });
+    if (!fresh.id) return;
+    await ensureOwnedContainerGroup(getOwnedWindowRole(leaseKey), oldTab.windowId, [fresh.id]);
+    preferOwnedTab(leaseKey, fresh.id);
+    await safeDetach(oldTabId);
+    identity.evictTab(oldTabId);
+    await chrome.tabs.remove(oldTabId).catch(() => {});
+    console.warn(`[opencli] Replaced unattachable owned tab ${oldTabId} with ${fresh.id} (session=${session.session})`);
+  });
+}
+
+async function handleCommandOnce(cmd: Command): Promise<Result> {
   // Native browser resources do not belong to a page session or idle timer.
   if (cmd.action === 'chrome-describe' || cmd.action === 'chrome-call') {
     try {
@@ -2004,6 +2041,7 @@ async function handleTabs(cmd: Command, leaseKey: string): Promise<Result> {
           return { id: cmd.id, ok: false, error: `Page is not in the automation container` };
         }
         await chrome.tabs.update(cmdTabId, { active: true });
+        await focusOwnedWindowIfRequested(tab.windowId, 'foreground');
         preferOwnedTab(leaseKey, cmdTabId);
         return pageScopedResult(cmd.id, cmdTabId, { selected: true });
       }
@@ -2011,6 +2049,7 @@ async function handleTabs(cmd: Command, leaseKey: string): Promise<Result> {
       const target = tabs[cmd.index!];
       if (!target?.id) return { id: cmd.id, ok: false, error: `Tab index ${cmd.index} not found` };
       await chrome.tabs.update(target.id, { active: true });
+      await focusOwnedWindowIfRequested(target.windowId, 'foreground');
       preferOwnedTab(leaseKey, target.id);
       return pageScopedResult(cmd.id, target.id, { selected: true });
     }

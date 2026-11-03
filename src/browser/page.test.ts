@@ -577,8 +577,8 @@ describe('daemon-backed native input visibility', () => {
     await expect(page.nativeClick(1, 2)).rejects.toMatchObject({ code: 'COMMAND_EXEC' });
     await expect(page.pressKey('Enter')).rejects.toMatchObject({ code: 'COMMAND_EXEC' });
     await expect(page.clickWithQuads('1')).rejects.toMatchObject({ code: 'COMMAND_EXEC' });
-    expect(sendCommandMock.mock.calls.every(([action]) => action === 'exec')).toBe(true);
-    expect(sendCommandMock.mock.calls.every(([, args]) => args.code.includes('document.visibilityState'))).toBe(true);
+    // Bringing the tab to the front may look it up, but no input reaches CDP.
+    expect(sendCommandMock.mock.calls.some(([action]) => action === 'cdp')).toBe(false);
   });
   it('does not dispatch input when the visibility probe fails', async () => {
     sendCommandMock.mockRejectedValue(new Error('Execution context unavailable'));
