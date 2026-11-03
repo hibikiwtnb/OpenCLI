@@ -173,7 +173,7 @@ export async function ensureBrowserBridgeReady(
     { label: 'Starting the browser', run: () => daemonLifecycleHooks.runBrowserLauncher('start'), timeoutMs: recoveryTimeoutMs },
     { label: 'Restarting the browser', run: () => daemonLifecycleHooks.runBrowserLauncher('restart'), timeoutMs: recoveryTimeoutMs },
   ];
-  let lastHealth = finalHealth;
+  let lastHealth: DaemonHealth = finalHealth;
   for (const step of steps) {
     if (!(await step.run())) continue;
     if (verbose && (process.env.OPENCLI_VERBOSE || process.stderr.isTTY)) {
