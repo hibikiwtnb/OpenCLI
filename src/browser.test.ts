@@ -1,10 +1,15 @@
-import { afterEach, describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { BrowserBridge } from './browser/index.js';
 import { withTimeoutMs } from './runtime.js';
 import { __test__ as cdpTest } from './browser/cdp.js';
 import { classifyBrowserError } from './browser/errors.js';
 import * as daemonTransport from './browser/daemon-transport.js';
 import * as daemonLifecycle from './browser/daemon-lifecycle.js';
+
+beforeEach(() => {
+  // Unit tests must not read a developer's real browser-launcher config.
+  vi.stubEnv('OPENCLI_CONFIG_DIR', '/nonexistent-opencli-config');
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -256,6 +261,31 @@ describe('BrowserBridge state', () => {
     const bridge = new BrowserBridge();
 
     await expect(bridge.connect({ timeout: 0.1 })).rejects.toThrow('Stale daemon could not be replaced');
+  });
+
+  it('keeps a daemon owned by a newer CLI instead of replacing it (#2761)', async () => {
+    vi.spyOn(daemonTransport, 'getDaemonHealth').mockResolvedValue({
+      state: 'ready',
+      status: {
+        ok: true,
+        pid: 999999,
+        uptime: 0,
+        daemonVersion: '999.0.0',
+        extensionConnected: true,
+        pending: 0,
+        memoryMB: 0,
+        port: 0,
+      },
+    });
+    const shutdown = vi.spyOn(daemonLifecycle.daemonLifecycleHooks, 'requestDaemonShutdown').mockResolvedValue(true);
+    const spawn = vi.spyOn(daemonLifecycle.daemonLifecycleHooks, 'spawnDaemonProcess');
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+    await expect(daemonLifecycle.ensureBrowserBridgeReady({ timeoutSeconds: 0.1, verbose: false }))
+      .resolves.toMatchObject({ state: 'ready' });
+    expect(shutdown).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    expect(killSpy).not.toHaveBeenCalled();
   });
 
   it('falls back to SIGKILL when stale daemon refuses graceful shutdown', async () => {

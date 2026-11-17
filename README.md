@@ -6,6 +6,7 @@
 
 [![中文文档](https://img.shields.io/badge/docs-%E4%B8%AD%E6%96%87-0F766E?style=flat-square)](./README.zh-CN.md)
 [![npm](https://img.shields.io/npm/v/@jackwener/opencli?style=flat-square)](https://www.npmjs.com/package/@jackwener/opencli)
+[![Chrome Web Store](https://img.shields.io/badge/Chrome_Web_Store-Install_extension-4285F4?style=flat-square&logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/opencli/ildkmabpimmkaediidaifkhjpohdnifk)
 [![Node.js Version](https://img.shields.io/node/v/@jackwener/opencli?style=flat-square)](https://nodejs.org)
 [![License](https://img.shields.io/npm/l/@jackwener/opencli?style=flat-square)](./LICENSE)
 
@@ -163,6 +164,12 @@ npx skills add jackwener/opencli --skill opencli-autofix
 npx skills add jackwener/opencli --skill opencli-browser
 npx skills add jackwener/opencli --skill opencli-usage
 ```
+
+OpenCLI no longer ships the sitemap skills. Older `opencli-sitemap-author` and
+`opencli-browser-sitemap` copies may remain in an agent's separate skills directory after an
+upgrade. If they remain, use the agent's removal flow if available; otherwise remove only those two
+directories (for example, `~/.agents/skills/opencli-sitemap-author`). The location varies by agent;
+keep the rest of the skills directory.
 
 ### Which skill to use
 
