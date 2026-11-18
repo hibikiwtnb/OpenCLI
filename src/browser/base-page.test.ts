@@ -992,3 +992,81 @@ describe('hidden native input failures', () => {
     expect(page.scripts).toEqual([]);
   });
 });
+
+describe('BasePage bringToFront visibility polling', () => {
+  class BringToFrontPage extends ActionPage {
+    visibilitySequence: unknown[] = [];
+    bringResult: Promise<boolean> | (() => Promise<boolean>) = Promise.resolve(true);
+    bringCalls = 0;
+    visibilityChecks = 0;
+
+    override async evaluate(input: string | BrowserEvaluateFunction<unknown[], unknown>): Promise<unknown> {
+      if (input === NATIVE_INPUT_VISIBILITY_JS) {
+        this.visibilityChecks++;
+        return this.visibilitySequence.length > 0 ? this.visibilitySequence.shift() : this.visibility;
+      }
+      return super.evaluate(input as string);
+    }
+
+    protected override async bringToFront(): Promise<boolean> {
+      this.bringCalls++;
+      return typeof this.bringResult === 'function' ? this.bringResult() : this.bringResult;
+    }
+
+    checkNativeInputVisible(): Promise<void> {
+      return this.assertNativeInputVisible();
+    }
+  }
+
+  it('passes after bringToFront makes the page visible during polling', async () => {
+    vi.useFakeTimers();
+    try {
+      const page = new BringToFrontPage();
+      page.visibilitySequence = ['hidden', 'hidden', 'visible'];
+
+      const pending = page.checkNativeInputVisible();
+      await vi.advanceTimersByTimeAsync(200);
+      await pending;
+
+      expect(page.bringCalls).toBe(1);
+      expect(page.visibilityChecks).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('polls up to 5 times and throws NativeInputVisibilityError when page stays hidden', async () => {
+    vi.useFakeTimers();
+    try {
+      const page = new BringToFrontPage();
+      page.visibility = 'hidden';
+
+      const pending = page.checkNativeInputVisible();
+      const assertion = expect(pending).rejects.toBeInstanceOf(NativeInputVisibilityError);
+
+      await vi.advanceTimersByTimeAsync(5 * 200);
+      await assertion;
+
+      expect(page.bringCalls).toBe(1);
+      expect(page.visibilityChecks).toBe(6);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('throws immediately without polling when bringToFront returns false or rejects', async () => {
+    const pageFalse = new BringToFrontPage();
+    pageFalse.visibility = 'hidden';
+    pageFalse.bringResult = Promise.resolve(false);
+    await expect(pageFalse.checkNativeInputVisible()).rejects.toBeInstanceOf(NativeInputVisibilityError);
+    expect(pageFalse.bringCalls).toBe(1);
+    expect(pageFalse.visibilityChecks).toBe(1);
+
+    const pageReject = new BringToFrontPage();
+    pageReject.visibility = 'hidden';
+    pageReject.bringResult = () => Promise.reject(new Error('tab missing'));
+    await expect(pageReject.checkNativeInputVisible()).rejects.toBeInstanceOf(NativeInputVisibilityError);
+    expect(pageReject.bringCalls).toBe(1);
+    expect(pageReject.visibilityChecks).toBe(1);
+  });
+});

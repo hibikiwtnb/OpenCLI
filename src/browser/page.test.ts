@@ -587,3 +587,61 @@ describe('daemon-backed native input visibility', () => {
     expect(sendCommandMock.mock.calls.some(([action]) => action === 'cdp')).toBe(false);
   });
 });
+
+describe('Page.bringToFront', () => {
+  beforeEach(() => {
+    sendCommandMock.mockReset();
+    sendCommandFullMock.mockReset();
+  });
+
+  const callBringToFront = (page: Page) =>
+    (page as unknown as { bringToFront(): Promise<boolean> }).bringToFront();
+
+  it('selects the bound target page directly when _page is already set', async () => {
+    sendCommandFullMock
+      .mockResolvedValueOnce({ page: 'page-target', data: { url: 'https://example.com/' } })
+      .mockResolvedValueOnce({ page: 'page-target', data: {} });
+
+    const page = new Page('site:demo', undefined, 'ctx-1', undefined, 'adapter');
+    await page.goto('https://example.com/', { waitUntil: 'none' });
+    sendCommandMock.mockClear();
+
+    await expect(callBringToFront(page)).resolves.toBe(true);
+
+    expect(sendCommandMock).not.toHaveBeenCalled();
+    expect(sendCommandFullMock).toHaveBeenLastCalledWith('tabs', expect.objectContaining({
+      op: 'select',
+      page: 'page-target',
+      session: 'site:demo',
+      contextId: 'ctx-1',
+      surface: 'adapter',
+    }));
+  });
+
+  it('falls back to the first tab when _page is unset', async () => {
+    sendCommandMock.mockResolvedValueOnce([{ page: 'page-first' }, { page: 'page-second' }]);
+    sendCommandFullMock.mockResolvedValueOnce({ page: 'page-first', data: {} });
+
+    const page = new Page('site:demo');
+    await expect(callBringToFront(page)).resolves.toBe(true);
+
+    expect(sendCommandMock).toHaveBeenCalledWith('tabs', expect.objectContaining({
+      op: 'list',
+      session: 'site:demo',
+    }));
+    expect(sendCommandFullMock).toHaveBeenCalledWith('tabs', expect.objectContaining({
+      op: 'select',
+      page: 'page-first',
+      session: 'site:demo',
+    }));
+  });
+
+  it('returns false without selecting when _page is unset and no tabs exist', async () => {
+    sendCommandMock.mockResolvedValueOnce([]);
+
+    const page = new Page('site:demo');
+    await expect(callBringToFront(page)).resolves.toBe(false);
+
+    expect(sendCommandFullMock).not.toHaveBeenCalled();
+  });
+});
