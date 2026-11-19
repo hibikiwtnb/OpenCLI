@@ -54,6 +54,15 @@ describe('classifyBrowserError', () => {
     }
   });
 
+  it('classifies chrome_call_timeout as non-retryable', () => {
+    const advice = classifyBrowserError(Object.assign(
+      new Error('chrome.tabs.create did not return within 30s'),
+      { code: 'chrome_call_timeout' },
+    ));
+    expect(advice.kind).toBe('non-retryable');
+    expect(advice.retryable).toBe(false);
+  });
+
   it('handles non-Error values', () => {
     expect(classifyBrowserError('Extension disconnected').kind).toBe('extension-transient');
     expect(classifyBrowserError(42).kind).toBe('non-retryable');
